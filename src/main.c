@@ -20,6 +20,7 @@
 #include "hal_device.h"
 #include "hal_conf.h"
 #include "stdio.h"
+#include "pt-1.4/pt.h"
 
 extern u32 SystemCoreClock;
 void delay_init(void);
@@ -52,21 +53,149 @@ static __IO uint32_t TimingDelay;
 #define LED4_ON()  GPIO_ResetBits(LED4_Port,LED4_Pin)	 
 #define LED4_OFF()  GPIO_SetBits(LED4_Port,LED4_Pin)	 
 #define LED4_TOGGLE()  (GPIO_ReadOutputDataBit(LED4_Port,LED4_Pin))?(GPIO_ResetBits(LED4_Port,LED4_Pin)):(GPIO_SetBits(LED4_Port,LED4_Pin))
+uint32_t  systemTicks=0;
+uint32_t  ledBlinkInterval=500;
+typedef enum {KEYIDLE,KEYDOWN,KEYHOLD,KEYUP}keyStatusEnu;
+
+typedef struct {
+    uint16_t keyValue;
+    keyStatusEnu  keyStatus;
+
+}keyEvent;
+keyEvent key;
+struct pt keyPt,ledPt;
+typedef struct  {
+     uint32_t ledStartTick;
+     uint32_t ledKeepTick;
+}ledParmeter_t;
+
+typedef struct {
+    uint32_t keyPressingStartTick;
+    uint32_t keyPressingHoldTick;
+}keyPressTime_t;
+
+ledParmeter_t  ledParameter;
+keyPressTime_t  keyPressTimer;
+
+void startLedTimer(uint32_t timeTick,uint32_t interval)
+{
+    ledParameter.ledStartTick=timeTick;
+    ledParameter.ledKeepTick=interval;
+}
+
+uint32_t calTimeGap(uint32_t start,uint32_t end)
+{
+    if(start<=end){
+        return end-start;
+    }else{
+        return 0xffffffff-start+end;
+    }
+}
+
+void startKeyTimer(uint32_t timeTick,uint32_t interval)
+{
+    keyPressTimer.keyPressingStartTick=timeTick;
+    keyPressTimer.keyPressingHoldTick=interval;
+}
+uint16_t checkKeyTimeExpired()
+{
+    if(calTimeGap(keyPressTimer.keyPressingStartTick,systemTicks)>keyPressTimer.keyPressingHoldTick){
+       return 1;
+    }else {
+        return 0;
+    }
+}
+
+uint16_t getKeyPressS(keyStatusEnu status)
+{
+    if(status==KEYDOWN){
+       if(GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_10)==Bit_RESET)
+           return 1;
+       else
+           return 0;
+    }else{
+       if(GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_10)==Bit_SET)
+           return 1;
+       else
+           return 0;        
+    }
+
+}
+
+uint16_t checkIfTimerExpired()
+{
+    if(calTimeGap(ledParameter.ledStartTick,systemTicks)>ledParameter.ledKeepTick){
+        return 1;
+    }else{
+        return 0;
+    }
+}
+static PT_THREAD(ledThread(struct pt *pt))
+{
+   PT_BEGIN(pt);
+   while(1)
+   {
+      LED1_TOGGLE();
+      startLedTimer(systemTicks,ledBlinkInterval);
+      PT_WAIT_UNTIL(pt,checkIfTimerExpired());
+      #if 0
+      LED2_TOGGLE();
+      startLedTimer(systemTicks,ledBlinkInterval);
+      PT_WAIT_UNTIL(pt,checkIfTimerExpired());
+      LED3_TOGGLE();
+      startLedTimer(systemTicks,ledBlinkInterval);
+      PT_WAIT_UNTIL(pt,checkIfTimerExpired());
+      LED4_TOGGLE();
+      startLedTimer(systemTicks,ledBlinkInterval);
+      PT_WAIT_UNTIL(pt,checkIfTimerExpired());
+      #endif
+   }
+   PT_END(pt);
+}
+
+static PT_THREAD(keyCheckThread(struct pt *pt))
+{
+    PT_BEGIN(pt);
+    keyPressTimer.keyPressingHoldTick=200;
+    while(1){       
+       PT_WAIT_UNTIL(pt,getKeyPressS(KEYDOWN));
+       startKeyTimer(systemTicks,20);
+       PT_WAIT_UNTIL(pt,checkKeyTimeExpired());
+       if(getKeyPressS(KEYDOWN)==0){
+         key.keyValue=4;
+         key.keyStatus=KEYDOWN;
+         ledBlinkInterval=ledBlinkInterval+500;
+       }else{
+          continue;
+       }
+       while(1){
+            startKeyTimer(systemTicks,200);
+            PT_WAIT_UNTIL(pt,getKeyPressS(KEYUP)||checkKeyTimeExpired());
+            if(getKeyPressS(KEYUP)==1)break;
+            key.keyStatus=KEYHOLD;
+       }
+      
+       key.keyStatus=KEYUP;      
+       startKeyTimer(systemTicks,200);    
+       PT_WAIT_UNTIL(pt,checkKeyTimeExpired());  
+       key.keyStatus=KEYIDLE;
+       key.keyValue=4;  
+   }
+   PT_END(pt);
+
+}
+
+
 
 int main(void)    
 {
     delay_init();
     LED_Init();
+    KEY_Init();
     while(1)             
     {
-        LED1_TOGGLE();
-        delay_ms(1000);
-        LED2_TOGGLE();
-        delay_ms(1000);
-        LED3_TOGGLE();
-        delay_ms(1000);
-        LED4_TOGGLE();
-        delay_ms(1000);
+       keyCheckThread(&keyPt);
+       ledThread(&ledPt);
     }
 }
 
@@ -85,7 +214,7 @@ void delay_init(void)
 
 void SysTick_Handler(void)
 {
-    TimingDelay_Decrement();
+    systemTicks++;
 }
 
 
@@ -178,6 +307,30 @@ void LED_Init(void)
     
     LED4_OFF();      
 
+}
+
+#define KEY3_GPIO_Port                  GPIOB
+#define KEY3_Pin                        GPIO_Pin_10
+#define KEY4_GPIO_Port                  GPIOB
+#define KEY4_Pin                        GPIO_Pin_0
+#define KEY3_PIN_SOURCE                 GPIO_PinSource10
+#define KEY4_PIN_SOURCE                 GPIO_PinSource0
+
+void KEY_Init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct;
+    RCC_AHBPeriphClockCmd(RCC_AHBENR_GPIOA | RCC_AHBENR_GPIOB | RCC_AHBENR_GPIOC, ENABLE);
+
+    GPIO_InitStruct.GPIO_Pin  = KEY3_Pin;
+    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_Init(KEY3_GPIO_Port, &GPIO_InitStruct);
+    GPIO_InitStruct.GPIO_Pin  = KEY4_Pin;
+    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_Init(KEY4_GPIO_Port, &GPIO_InitStruct);
+   // GPIO_PinAFConfig(KEY1_GPIO_Port, KEY1_PIN_SOURCE, GPIO_AF_15);
+   // GPIO_PinAFConfig(KEY2_GPIO_Port, KEY2_PIN_SOURCE, GPIO_AF_15);
+    GPIO_PinAFConfig(KEY3_GPIO_Port, KEY3_PIN_SOURCE, GPIO_AF_15);
+    GPIO_PinAFConfig(KEY4_GPIO_Port, KEY4_PIN_SOURCE, GPIO_AF_15);
 }
 
 /**
